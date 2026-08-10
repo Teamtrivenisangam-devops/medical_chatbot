@@ -2,24 +2,23 @@ pipeline {
     agent any
 
     environment {
-        SONAR_HOST_URL       = 'http://20.219.65.106:9000'
-        ANSIBLE_FORCE_COLOR  = 'true'
+        SONAR_HOST_URL      = 'http://20.219.65.106:9000'
+        ANSIBLE_FORCE_COLOR = 'true'
     }
 
     tools {
-        // Fixes the compilation error (sonarRunner is the valid tool key)
-        sonarRunner 'sonar-scanner'
+        // Uses the full class key exposed by the SonarQube plugin in Jenkins
+        'hudson.plugins.sonar.SonarRunnerInstallation' 'sonar-scanner'
     }
 
     stages {
-        stage('Checkout Source Code') {
+        stage('Checkout Code') {
             steps {
-                // Pulls code from the repository configured in Jenkins
                 checkout scm
             }
         }
 
-        stage('Setup Environment & Run Unit Tests') {
+        stage('Environment Setup & Unit Tests') {
             steps {
                 sh '''
                     python3 -m venv venv
@@ -33,7 +32,7 @@ pipeline {
             }
         }
 
-        stage('Code Quality Linting') {
+        stage('Linting (Flake8)') {
             steps {
                 sh '''
                     . venv/bin/activate
@@ -42,29 +41,26 @@ pipeline {
             }
         }
 
-        stage('SonarQube Code Analysis') {
+        stage('SonarQube Static Analysis') {
             steps {
-                // Injects SonarQube server configuration defined in Jenkins
                 withSonarQubeEnv('sonar-server') {
                     sh 'sonar-scanner'
                 }
             }
         }
 
-        stage('SonarQube Quality Gate') {
+        stage('Quality Gate') {
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
                     script {
-                        // Pauses pipeline until SonarQube completes analysis and checks Quality Gate
                         waitForQualityGate abortPipeline: true
                     }
                 }
             }
         }
 
-        stage('Deploy App via Ansible to Azure VM') {
+        stage('Ansible Deploy to Azure VM') {
             steps {
-                // Injects Azure credentials stored in Jenkins Credentials Manager
                 withCredentials([
                     string(credentialsId: 'blob-key', variable: 'BLOB_KEY'),
                     string(credentialsId: 'storage-account-name', variable: 'STORAGE_ACCOUNT')
@@ -81,16 +77,14 @@ pipeline {
 
     post {
         always {
-            // Publishes test results back to Jenkins dashboard
             junit allowEmptyResults: true, testResults: 'test-reports/results.xml'
-            // Cleans up workspace to keep disk usage low
             cleanWs()
         }
         success {
-            echo 'SUCCESS: Pipeline finished without errors. Meddy app is live on Azure VM!'
+            echo 'Pipeline completed successfully and Meddy is live!'
         }
         failure {
-            echo 'FAILURE: Pipeline failed. Please inspect stage logs above.'
+            echo 'Pipeline failed. Check SonarQube or Ansible logs.'
         }
     }
 }
