@@ -2,8 +2,14 @@ pipeline {
     agent any
 
     environment {
-        SONAR_HOST_URL = 'http://localhost:9000'
+        // Points to SonarQube via VM Public IP (accessible from inside the container)
+        SONAR_HOST_URL = 'http://20.219.65.106:9000'
         ANSIBLE_FORCE_COLOR = 'true'
+    }
+
+    tools {
+        // Matches the SonarQube Scanner Tool Name configured in Manage Jenkins -> Tools
+        sonarScanner 'sonar-scanner'
     }
 
     stages {
@@ -21,6 +27,7 @@ pipeline {
                     pip install --upgrade pip
                     pip install -r requirements.txt
                     pip install pytest flake8
+                    mkdir -p test-reports
                     pytest --junitxml=test-reports/results.xml || true
                 '''
             }
@@ -37,22 +44,25 @@ pipeline {
 
         stage('SonarQube Static Analysis') {
             steps {
-                withCredentials([string(credentialsId: 'sonarqube-token', variable: 'SONAR_TOKEN')]) {
-                    sh '''
-                        sonar-scanner \
-                          -Dsonar.host.url=${SONAR_HOST_URL} \
-                          -Dsonar.login=${SONAR_TOKEN}
-                    '''
+                // Uses the Jenkins SonarQube server configuration 'sonar-server'
+                withSonarQubeEnv('sonar-server') {
+                    withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                        sh '''
+                            sonar-scanner \
+                              -Dsonar.host.url=${SONAR_HOST_URL} \
+                              -Dsonar.login=${SONAR_TOKEN}
+                        '''
+                    }
                 }
             }
         }
 
         stage('Quality Gate') {
             steps {
-                timeout(time: 2, unit: 'MINUTES') {
+                timeout(time: 5, unit: 'MINUTES') {
                     script {
-                        // Waits for SonarQube server processing to finish
-                        sh 'sleep 5'
+                        // Pauses pipeline execution until SonarQube finishes processing report
+                        waitForQualityGate abortPipeline: true
                     }
                 }
             }
@@ -60,8 +70,10 @@ pipeline {
 
         stage('Ansible Deploy to Azure VM') {
             steps {
-                withCredentials([string(credentialsId: 'blob-key', variable: 'BLOB_KEY'),
-                                 string(credentialsId: 'storage-account-name', variable: 'STORAGE_ACCOUNT')]) {
+                withCredentials([
+                    string(credentialsId: 'blob-key', variable: 'BLOB_KEY'),
+                    string(credentialsId: 'storage-account-name', variable: 'STORAGE_ACCOUNT')
+                ]) {
                     sh '''
                         cd ansible
                         ansible-playbook -i inventory.ini deploy.yml \
@@ -74,7 +86,7 @@ pipeline {
 
     post {
         always {
-            junit 'test-reports/results.xml'
+            junit allowEmptyResults: true, testResults: 'test-reports/results.xml'
             cleanWs()
         }
         success {
