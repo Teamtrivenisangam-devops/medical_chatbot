@@ -1,0 +1,131 @@
+---
+- name: Deploy Meddy Medical Chatbot to Azure VM
+  hosts: azure_vm
+  become: yes
+  vars:
+    app_dir: "/opt/meddy-chatbot"
+    service_user: "meddy"
+    blob_account: ""
+    blob_account_key: ""
+
+  tasks:
+    - name: Install required system packages
+      apt:
+        name:
+          - python3
+          - python3-venv
+          - python3-pip
+          - nginx
+          - rsync
+          - curl
+        state: present
+        update_cache: yes
+
+    - name: Create non-login service user
+      user:
+        name: "{{ service_user }}"
+        shell: /usr/sbin/nologin
+        system: yes
+        create_home: yes
+
+    - name: Ensure application directory exists
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: '0755'
+
+    - name: Synchronize project files to target VM
+      synchronize:
+        src: "{{ playbook_dir }}/../"
+        dest: "{{ app_dir }}/"
+        rsync_opts:
+          - "--exclude=venv"
+          - "--exclude=.git"
+          - "--exclude=__pycache__"
+          - "--exclude=.pytest_cache"
+
+    - name: Create Python virtual environment and install requirements
+      pip:
+        requirements: "{{ app_dir }}/requirements.txt"
+        virtualenv: "{{ app_dir }}/venv"
+        virtualenv_command: "python3 -m venv"
+
+    - name: Install Azure CLI to download models from Blob Storage
+      shell: |
+        curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+      args:
+        creates: /usr/bin/az
+
+    - name: Ensure models directory exists
+      file:
+        path: "{{ app_dir }}/models"
+        state: directory
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: '0755'
+
+    - name: Download machine learning models from Azure Blob Storage
+      shell: |
+        az storage blob download-batch \
+          --account-name {{ blob_account }} \
+          --account-key {{ blob_account_key }} \
+          --destination {{ app_dir }}/models \
+          --source meddy-models \
+          --overwrite true
+      when: blob_account != "" and blob_account_key != ""
+
+    - name: Set permissions for application files
+      file:
+        path: "{{ app_dir }}"
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        recurse: yes
+
+    - name: Configure Gunicorn systemd service
+      copy:
+        dest: /etc/systemd/system/meddy.service
+        content: |
+          [Unit]
+          Description=Meddy Flask Chatbot Service
+          After=network.target
+
+          [Service]
+          User={{ service_user }}
+          Group={{ service_user }}
+          WorkingDirectory={{ app_dir }}
+          ExecStart={{ app_dir }}/venv/bin/gunicorn --workers 3 --timeout 120 --bind 127.0.0.1:8000 app:app
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd and start Meddy service
+      systemd:
+        name: meddy
+        daemon_reload: yes
+        state: restarted
+        enabled: yes
+
+    - name: Configure Nginx as Reverse Proxy
+      copy:
+        dest: /etc/nginx/sites-available/default
+        content: |
+          server {
+              listen 80;
+              server_name _;
+
+              location / {
+                  proxy_pass http://127.0.0.1:8000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              }
+          }
+
+    - name: Restart Nginx service
+      service:
+        name: nginx
+        state: restarted
+        enabled: yes

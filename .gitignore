@@ -1,4 +1,7 @@
+.terraform/
+*.tfstate
+*.tfstate.backup
 venv/
 __pycache__/
+*.pyc
 .pytest_cache/
-*.zip
